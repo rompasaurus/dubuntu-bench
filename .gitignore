@@ -1,0 +1,22 @@
+# Benchmark results (keep structure, ignore data)
+results/*.log
+results/*.txt
+results/*.json
+!results/.gitkeep
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Downloaded installers
+*.deb
+*.run
+*.tar.gz
+*.tgz

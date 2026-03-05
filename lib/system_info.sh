@@ -147,15 +147,69 @@ get_ram_info() {
         echo -e "  ${BOLD}Swap:${NC}        ${swap_used} / ${swap_total}"
     fi
 
-    # Speed and type from dmidecode (requires root)
-    if command -v dmidecode &>/dev/null && [[ $EUID -eq 0 ]]; then
-        local mem_speed mem_type
-        mem_speed=$(dmidecode -t memory 2>/dev/null | grep -m1 'Speed:' | grep -v 'Unknown' | awk '{print $2, $3}')
-        mem_type=$(dmidecode -t memory 2>/dev/null | grep -m1 'Type:' | grep -v 'Unknown' | awk '{print $2}')
-        [[ -n "$mem_speed" ]] && echo -e "  ${BOLD}Speed:${NC}       ${mem_speed}"
-        [[ -n "$mem_type" ]] && echo -e "  ${BOLD}Type:${NC}        ${mem_type}"
-    else
-        echo -e "  ${DIM}(Run as root for RAM speed/type via dmidecode)${NC}"
+    # Try reading DDR5 SPD EEPROM via spd5118 driver (no root required)
+    local spd_found=false
+    local dimm_num=0
+    for eeprom in /sys/bus/i2c/drivers/spd5118/*/eeprom; do
+        [[ -r "$eeprom" ]] || continue
+
+        local spd_info
+        spd_info=$(python3 -c "
+import struct, sys
+try:
+    with open('${eeprom}', 'rb') as f:
+        data = f.read()
+    if len(data) < 30 or data[2] != 0x12:
+        sys.exit(1)
+    tck = struct.unpack_from('<H', data, 20)[0]
+    if tck <= 0:
+        sys.exit(1)
+    jedec_rate = int((1_000_000 / tck) * 2)
+    # Round to nearest standard speed
+    standards = [4800, 5200, 5600, 6000, 6400, 6800, 7200, 7600, 8000, 8400]
+    jedec_speed = min(standards, key=lambda s: abs(s - jedec_rate))
+    # Try to get part number from module info area
+    part = ''
+    if len(data) > 0x227:
+        part = data[0x209:0x227].decode('ascii', errors='replace').strip()
+    # Try to extract rated speed from part number (e.g. F5-6000...)
+    rated = ''
+    import re
+    m = re.search(r'(\d{4,5})', part)
+    if m:
+        rated = m.group(1)
+    print(f'{jedec_speed}|{rated}|DDR5|{part}')
+except Exception:
+    sys.exit(1)
+" 2>/dev/null) || continue
+
+        spd_found=true
+        dimm_num=$(( dimm_num + 1 ))
+        local jedec_speed rated_speed mem_type part_number
+        IFS='|' read -r jedec_speed rated_speed mem_type part_number <<< "$spd_info"
+
+        if (( dimm_num == 1 )); then
+            echo -e "  ${BOLD}Type:${NC}        ${mem_type}"
+            if [[ -n "$rated_speed" && "$rated_speed" != "$jedec_speed" ]]; then
+                echo -e "  ${BOLD}Rated:${NC}       DDR5-${rated_speed} MT/s (JEDEC base: ${jedec_speed})"
+            else
+                echo -e "  ${BOLD}Speed:${NC}       DDR5-${jedec_speed} MT/s"
+            fi
+        fi
+        echo -e "  ${BOLD}DIMM ${dimm_num}:${NC}      ${part_number:-Unknown}"
+    done
+
+    # Fallback to dmidecode if SPD wasn't readable
+    if ! $spd_found; then
+        if command -v dmidecode &>/dev/null && [[ $EUID -eq 0 ]]; then
+            local mem_speed mem_type
+            mem_speed=$(dmidecode -t memory 2>/dev/null | grep -m1 'Configured Memory Speed' | grep -v 'Unknown' | awk '{print $NF, $(NF-0)}')
+            mem_type=$(dmidecode -t memory 2>/dev/null | grep -m1 'Type:' | grep -v 'Unknown' | awk '{print $2}')
+            [[ -n "$mem_speed" ]] && echo -e "  ${BOLD}Speed:${NC}       ${mem_speed}"
+            [[ -n "$mem_type" ]] && echo -e "  ${BOLD}Type:${NC}        ${mem_type}"
+        else
+            echo -e "  ${DIM}(Run as root for RAM speed/type via dmidecode)${NC}"
+        fi
     fi
 }
 
